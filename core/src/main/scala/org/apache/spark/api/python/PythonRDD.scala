@@ -22,6 +22,7 @@ import java.net._
 import java.util.{List => JList, ArrayList => JArrayList, Map => JMap, Collections}
 
 import scala.collection.JavaConversions._
+import scala.reflect.ClassTag
 
 import org.apache.spark.api.java.{JavaSparkContext, JavaPairRDD, JavaRDD}
 import org.apache.spark.broadcast.Broadcast
@@ -29,8 +30,7 @@ import org.apache.spark._
 import org.apache.spark.rdd.RDD
 import org.apache.spark.util.Utils
 
-
-private[spark] class PythonRDD[T: ClassManifest](
+private[spark] class PythonRDD[T: ClassTag](
     parent: RDD[T],
     command: Array[Byte],
     envVars: JMap[String, String],
@@ -41,7 +41,7 @@ private[spark] class PythonRDD[T: ClassManifest](
     accumulator: Accumulator[JList[Array[Byte]]])
   extends RDD[Array[Byte]](parent) {
 
-  val bufferSize = System.getProperty("spark.buffer.size", "65536").toInt
+  val bufferSize = conf.getInt("spark.buffer.size", 65536)
 
   override def getPartitions = parent.partitions
 
@@ -95,7 +95,7 @@ private[spark] class PythonRDD[T: ClassManifest](
 
     // Return an iterator that read lines from the process's stdout
     val stream = new DataInputStream(new BufferedInputStream(worker.getInputStream, bufferSize))
-    return new Iterator[Array[Byte]] {
+    val stdoutIterator = new Iterator[Array[Byte]] {
       def next(): Array[Byte] = {
         val obj = _nextObj
         if (hasNext) {
@@ -148,7 +148,7 @@ private[spark] class PythonRDD[T: ClassManifest](
           case eof: EOFException => {
             throw new SparkException("Python worker exited unexpectedly (crashed)", eof)
           }
-          case e => throw e
+          case e: Throwable => throw e
         }
       }
 
@@ -156,6 +156,7 @@ private[spark] class PythonRDD[T: ClassManifest](
 
       def hasNext = _nextObj.length != 0
     }
+    stdoutIterator
   }
 
   val asJavaRDD : JavaRDD[Array[Byte]] = JavaRDD.fromRDD(this)
@@ -200,7 +201,7 @@ private[spark] object PythonRDD {
       }
     } catch {
       case eof: EOFException => {}
-      case e => throw e
+      case e: Throwable => throw e
     }
     JavaRDD.fromRDD(sc.sc.parallelize(objs, parallelism))
   }
@@ -235,10 +236,6 @@ private[spark] object PythonRDD {
     file.close()
   }
 
-  def takePartition[T](rdd: RDD[T], partition: Int): Iterator[T] = {
-    implicit val cm : ClassManifest[T] = rdd.elementClassManifest
-    rdd.context.runJob(rdd, ((x: Iterator[T]) => x.toArray), Seq(partition), true).head.iterator
-  }
 }
 
 private class BytesToString extends org.apache.spark.api.java.function.Function[Array[Byte], String] {
@@ -254,7 +251,7 @@ private class PythonAccumulatorParam(@transient serverHost: String, serverPort: 
 
   Utils.checkHost(serverHost, "Expected hostname")
 
-  val bufferSize = System.getProperty("spark.buffer.size", "65536").toInt
+  val bufferSize = SparkEnv.get.conf.getInt("spark.buffer.size", 65536)
 
   override def zero(value: JList[Array[Byte]]): JList[Array[Byte]] = new JArrayList
 
